@@ -332,6 +332,11 @@ select:focus{border-color:var(--accent)}
       <div class="loading-text">Memuat peta...</div>
     </div>
 
+    <!-- Permission / GPS status overlay -->
+    <div id="perm-overlay" style="display:none;position:absolute;inset:0;background:rgba(10,14,26,0.92);z-index:1500;align-items:center;justify-content:center;backdrop-filter:blur(4px)">
+      <div style="text-align:center"><div class="loading-ring" style="margin:0 auto 16px"></div><div style="font-family:var(--font-display);font-size:12px;color:var(--muted)">Mendapatkan lokasi GPS real...</div></div>
+    </div>
+
     <div id="map"></div>
 
     <!-- Place name overlay -->
@@ -406,14 +411,6 @@ function initMap() {
     attributionControl: false
   });
 
-  // Auto-center ke posisi nyata user saat peta pertama dibuka
-  if (navigator.geolocation) {
-    navigator.geolocation.getCurrentPosition(
-      pos => { map.setView([pos.coords.latitude, pos.coords.longitude], 15); },
-      () => {}
-    );
-  }
-
   tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     className: 'map-tiles'
@@ -425,14 +422,107 @@ function initMap() {
 
   map.on('click', onMapClick);
 
-  // Dark tile filter via CSS
   const style = document.createElement('style');
   style.textContent = '.map-tiles{filter:invert(1) hue-rotate(200deg) brightness(0.85) saturate(1.2)}';
   document.head.appendChild(style);
 
   document.getElementById('loading').style.display = 'none';
   toast('Peta dimuat ✓', 'ok');
+
+  // Minta lokasi real segera saat app dibuka
+  requestRealLocation();
 }
+
+function requestRealLocation() {
+  if (!navigator.geolocation) {
+    showPermissionError('Browser tidak mendukung GPS');
+    return;
+  }
+
+  // Cek status permission dulu kalau browser support
+  if (navigator.permissions) {
+    navigator.permissions.query({ name: 'geolocation' }).then(result => {
+      if (result.state === 'denied') {
+        showPermissionError('denied');
+        return;
+      }
+      doGetLocation();
+      result.onchange = () => {
+        if (result.state === 'granted') { hidePermissionOverlay(); doGetLocation(); }
+        if (result.state === 'denied') showPermissionError('denied');
+      };
+    });
+  } else {
+    doGetLocation();
+  }
+}
+
+function doGetLocation() {
+  showLoadingLocation();
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      hidePermissionOverlay();
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      map.setView([lat, lng], 16);
+      // Tampilkan marker posisi awal (sebelum tracking dimulai)
+      currentPos = { lat, lng, acc: Math.round(pos.coords.accuracy), alt: null, speed: 0, heading: null, ts: new Date() };
+      updateCurrentMarker(lat, lng, null);
+      reverseGeocode(lat, lng, Math.round(pos.coords.accuracy));
+      document.getElementById('tb-lat').textContent = 'LAT: ' + lat.toFixed(6);
+      document.getElementById('tb-lng').textContent = 'LNG: ' + lng.toFixed(6);
+      document.getElementById('tb-acc').textContent = 'ACC: ±' + Math.round(pos.coords.accuracy) + 'm';
+      document.getElementById('bot-lat').textContent = lat.toFixed(5);
+      document.getElementById('bot-lng').textContent = lng.toFixed(5);
+      toast('📍 Lokasi ditemukan: ±' + Math.round(pos.coords.accuracy) + 'm', 'ok');
+      logAPI('INFO', 'Real GPS: ' + lat.toFixed(6) + ',' + lng.toFixed(6));
+    },
+    err => {
+      if (err.code === 1) showPermissionError('denied');
+      else if (err.code === 3) { toast('GPS timeout, coba lagi...', 'warn'); setTimeout(doGetLocation, 3000); }
+      else showPermissionError(err.message);
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+  );
+}
+
+function showLoadingLocation() {
+  const el = document.getElementById('perm-overlay');
+  if (el) { el.innerHTML = `<div style="text-align:center"><div class="loading-ring" style="margin:0 auto 16px"></div><div style="font-family:var(--font-display);font-size:12px;color:var(--muted)">Mendapatkan lokasi GPS real...</div><div style="font-size:11px;color:var(--muted2);margin-top:8px">Izinkan akses lokasi di browser kamu</div></div>`; el.style.display='flex'; }
+}
+
+function showPermissionError(reason) {
+  const el = document.getElementById('perm-overlay');
+  if (!el) return;
+  if (reason === 'denied') {
+    el.innerHTML = `
+      <div style="text-align:center;max-width:300px">
+        <div style="font-size:40px;margin-bottom:16px">🔒</div>
+        <div style="font-family:var(--font-display);font-size:13px;color:var(--danger);margin-bottom:8px">AKSES LOKASI DIBLOKIR</div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.7;margin-bottom:16px">
+          GPS real memerlukan izin lokasi.<br>
+          Klik ikon 🔒 / ⓘ di address bar browser<br>
+          → <b style="color:var(--text)">Izinkan Lokasi</b> → Reload halaman
+        </div>
+        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px;font-size:11px;color:var(--muted);font-family:var(--font-display);text-align:left;line-height:1.8">
+          Chrome: 🔒 → Lokasi → Izinkan<br>
+          Firefox: 🛡 → Izinkan Lokasi<br>
+          Safari: Preferensi → Situs Web → Lokasi
+        </div>
+        <button onclick="doGetLocation()" style="margin-top:12px;background:var(--accent);color:#000;border:none;border-radius:8px;padding:10px 24px;font-weight:700;cursor:pointer;font-size:12px">🔄 Coba Lagi</button>
+      </div>`;
+  } else {
+    el.innerHTML = `<div style="text-align:center"><div style="font-size:32px;margin-bottom:12px">⚠️</div><div style="font-family:var(--font-display);font-size:12px;color:var(--warn);margin-bottom:8px">GPS ERROR</div><div style="font-size:11px;color:var(--muted)">${reason}</div><button onclick="doGetLocation()" style="margin-top:12px;background:var(--accent);color:#000;border:none;border-radius:8px;padding:8px 20px;font-weight:700;cursor:pointer;font-size:12px">Coba Lagi</button></div>`;
+  }
+  el.style.display = 'flex';
+}
+
+function hidePermissionOverlay() {
+  const el = document.getElementById('perm-overlay');
+  if (el) el.style.display = 'none';
+}
+
+// (tile setup moved into initMap)
 
 function onMapClick(e) {
   if (measuringMode) {
@@ -458,18 +548,46 @@ function onMapClick(e) {
 // === TRACKING ===
 function startTracking() {
   if (!navigator.geolocation) { toast('Browser tidak support GPS', 'err'); return; }
-  tracking = true;
-  setStatus('active', 'TRACKING');
-  document.getElementById('btn-start').style.display = 'none';
-  document.getElementById('btn-stop').style.display = 'flex';
-  toast('Tracking dimulai', 'ok');
-  logAPI('INFO', 'Tracking started');
 
-  const opts = { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 };
-  watchId = navigator.geolocation.watchPosition(onPosition, onPosError, opts);
+  // Minta izin dulu sebelum start watch
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      // Izin ok, mulai watchPosition untuk real-time
+      tracking = true;
+      setStatus('active', 'TRACKING');
+      document.getElementById('btn-start').style.display = 'none';
+      document.getElementById('btn-stop').style.display = 'flex';
+      toast('▶ Tracking GPS real dimulai', 'ok');
+      logAPI('INFO', 'Tracking started — Real GPS aktif');
 
-  // Auto-interval fallback sim if real coords stuck
-  if (window._simInterval) clearInterval(window._simInterval);
+      const opts = { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 };
+      watchId = navigator.geolocation.watchPosition(onPosition, onTrackError, opts);
+    },
+    err => {
+      if (err.code === 1) {
+        showPermissionError('denied');
+        toast('❌ Izin lokasi ditolak — tidak bisa tracking real', 'err');
+      } else {
+        toast('GPS error: ' + err.message, 'err');
+      }
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+  );
+}
+
+function onTrackError(err) {
+  // Error saat tracking berlangsung (bukan permission error)
+  if (err.code === 1) {
+    toast('Izin GPS dicabut — tracking berhenti', 'err');
+    stopTracking();
+    showPermissionError('denied');
+  } else if (err.code === 2) {
+    toast('Sinyal GPS lemah, menunggu...', 'warn');
+    logAPI('WARN', 'GPS signal lost, retrying...');
+  } else if (err.code === 3) {
+    toast('GPS timeout, tetap menunggu sinyal...', 'warn');
+    logAPI('WARN', 'GPS timeout');
+  }
 }
 
 function stopTracking() {
@@ -539,58 +657,9 @@ function onPosition(pos) {
   updatePayloadPreview(currentPos);
 }
 
-function onPosError(err) {
-  const msgs = { 1: 'Izin lokasi ditolak', 2: 'Tidak dapat menentukan lokasi', 3: 'Timeout' };
-  toast(msgs[err.code] || 'Error GPS', 'err');
-  logAPI('ERR', 'GPS Error: ' + (msgs[err.code] || err.message));
+// onPosError dipindah ke onTrackError di atas
 
-  // Kalau GPS ditolak, coba ambil perkiraan koordinat via IP
-  if (err.code === 1 || err.code === 2) {
-    toast('Izin GPS ditolak — mencoba lokasi via IP...', 'warn');
-    getIPLocation();
-  }
-}
-
-async function getIPLocation() {
-  try {
-    const r = await fetch('https://ipapi.co/json/');
-    const d = await r.json();
-    if (d.latitude && d.longitude) {
-      toast('Lokasi via IP: ' + d.city + ', ' + d.region, 'info');
-      logAPI('INFO', 'IP Location: ' + d.latitude + ',' + d.longitude + ' (' + d.city + ')');
-      map.setView([d.latitude, d.longitude], 14);
-      simulatePosition(d.latitude, d.longitude);
-    } else {
-      simulatePosition(null, null);
-    }
-  } catch(e) {
-    toast('Demo mode — lokasi tidak diketahui', 'warn');
-    simulatePosition(null, null);
-  }
-}
-
-function simulatePosition(baseLat, baseLng) {
-  // Kalau tidak ada koordinat sama sekali, pakai Pontianak (tengah Indonesia)
-  let lat = (baseLat || -0.0263) + (Math.random() - 0.5) * 0.001;
-  let lng = (baseLng || 109.3425) + (Math.random() - 0.5) * 0.001;
-  let step = 0;
-
-  window._simInterval = setInterval(() => {
-    if (!tracking) { clearInterval(window._simInterval); return; }
-    lat += (Math.random() - 0.48) * 0.0003;
-    lng += (Math.random() - 0.48) * 0.0003;
-    onPosition({
-      coords: {
-        latitude: lat, longitude: lng,
-        accuracy: 10 + Math.random() * 20,
-        altitude: 720 + Math.random() * 5,
-        speed: Math.random() * 10,
-        heading: (step * 15) % 360
-      }
-    });
-    step++;
-  }, parseInt(document.getElementById('interval-select').value));
-}
+// simulatePosition dihapus — hanya pakai real GPS
 
 // === MARKER & PATH ===
 function updateCurrentMarker(lat, lng, heading) {
@@ -841,7 +910,7 @@ function updatePayloadPreview(pos) {
 async function testAPI() {
   if (!currentPos) {
     // demo payload
-    const demo = { lat: (currentPos && currentPos.lat) || 0, lng: (currentPos && currentPos.lng) || 0, acc: 10, alt: null, speed: 0, heading: 0, ts: new Date() };
+    toast("Aktifkan tracking dulu untuk test API dengan data real", "warn"); return;
     await sendToAPI(demo);
   } else {
     await sendToAPI(currentPos);
